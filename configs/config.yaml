@@ -1,0 +1,8 @@
+model:
+  pretrained_model_name: "google/ddpm-celebhq-256"
+
+data:
+  image_size: 256
+
+repaint:
+  num_inferencing_steps:1000

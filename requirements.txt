@@ -1,0 +1,7 @@
+torch
+torchvision
+diffusers
+transformers
+huggingface_hub
+Pillow
+pyyaml
