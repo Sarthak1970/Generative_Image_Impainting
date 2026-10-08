@@ -4,7 +4,7 @@ from PIL import Image
 
 def get_transforms(image_size:int=256):
     return T.Compose([
-        T.resize((image_size,image_size)),
+        T.Resize((image_size,image_size)),
         T.ToTensor(), #scales to [0,1]
         T.Normalize(mean=[0.5,0.5,0.5],std=[0.5,0.5,0.5])
     ])
