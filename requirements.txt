@@ -5,3 +5,4 @@ transformers
 huggingface_hub
 Pillow
 pyyaml
+accelerate

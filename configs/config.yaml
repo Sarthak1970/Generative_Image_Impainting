@@ -1,5 +1,5 @@
 model:
-  pretrained_model_name: "google/ddpm-celebhq-256"
+  pretrained_model_name: "google/ddpm-celebahq-256"
 
 data:
   image_size: 256

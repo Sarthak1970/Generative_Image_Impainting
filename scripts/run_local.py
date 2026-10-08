@@ -1,6 +1,8 @@
 import os
 import torch
+import urllib.request
 from pathlib import Path
+import random
 
 from src.config import load_config
 from src.dataset import load_image,tensor_to_pil
@@ -10,36 +12,45 @@ from src.repaint import repaint_pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# def download_celeba_test_face(target_path:Path):
+#     url="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint_sample.png"
+#     print(f"Downloading aligned CelebA test face to {target_path}")
+#     target_path.parent.mkdir(parents=True,exist_ok=True)
+#     urllib.request.urlretrieve(url,target_path)
+
+def get_random_image(data_dir:Path)->Path:
+    images=list(data_dir.glob("*.jpg"))
+
+    if not images:
+        raise FileNotFoundError(
+            f"Image not found at {images}"
+        )
+
+    selected=random.choice(images)
+    print(f"Selected test image:{selected}")
+    return selected
+
+
 def main():
-    config_path="configs/config.yaml"
-    cfg=load_config(config_path)
-    print(f"Loaded config from {config_path}: {cfg}")
+    config_path=PROJECT_ROOT/"configs"/"config.yaml"
+    cfg=load_config(str(config_path))
 
     device=get_device()
-    print(f"Using Device:{device}")
-
     model_name=cfg["model"]["pretrained_model_name"]
-    print(f"Loading Pretrained Model:{model_name}")
+    print(f"Using Device : {device} | Model : {model_name}")
 
-    model,scheduler,device=load_pretrained_ddpm(model_name,device)
+    model,scheduler,device=load_pretrained_ddpm(model_name,device=device)
 
     img_size=cfg["data"]["image_size"]
+    celeba_dir = PROJECT_ROOT / "data" / "celeba"
+    test_img_path = get_random_image(celeba_dir)
 
-    sample_img_path="data/sample_image.jpg"
+    x_0=load_image(str(test_img_path),img_size=img_size).to(device)
+    print(f"Loaded Original Image")
 
-    if os.path.exists(sample_img_path):
-        x_0=load_image(sample_img_path,img_size).to(device)
-        print(f"Loaded Sample Image from {sample_img_path}")
+    mask=create_center_mask(image_size=img_size,mask_ratio=0.35).to(device)
 
-    else:
-        print(f"Sample Image not fount at {sample_img_path}.Generating a synthetic placeholder image for testing.")
-        x_0=torch.rand((1,3,img_size,img_size),device=device)*2-1
-
-
-    mask=create_center_mask(image_size=img_size,mask_ratio=0.4).to(device)
-
-    print("Starting Repaint Inference--")
-
+    print(f"Running Repaint pipeline (this may take few minutes)")
     out_tensor=repaint_pipeline(
         model=model,
         scheduler=scheduler,
@@ -49,13 +60,13 @@ def main():
         jump_n_sample=2
     )
 
-    results_dir=PROJECT_ROOT/"results"
-    results_dir.mkdir(parents=True,exist_ok=True)
+    result_dir=PROJECT_ROOT/"results"
+    result_dir.mkdir(parents=True,exits_ok=True)
 
     out_img=tensor_to_pil(out_tensor)
-    out_img_path=results_dir/"repaint_output.jpg"
-    out_img.save(out_img_path)
-    print(f"Repaint Output saved at {out_img_path}")
+    output_filepath=result_dir/"repaint_result.png"
+    out_img.save(output_filepath)
+    print(f"Saved Repaint Result to {output_filepath}")
 
 if __name__ == "__main__":
     main()
