@@ -13,7 +13,7 @@ def main():
                          streaming=True)
 
 
-    num_images=10
+    num_images=20
 
     for i,sample in enumerate(dataset):
         if i>=num_images:

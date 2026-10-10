@@ -58,8 +58,8 @@ def main():
             scheduler=scheduler,
             x_0=x_0,
             mask=mask,
-            jump_length=10,       # Can be increased to 250 for paper-quality results
-            jump_n_sample=2       # Can be increased to 10 for paper-quality results
+            jump_length=10,       
+            jump_n_sample=10       
         )
         
         # Save isolated output
