@@ -5,4 +5,14 @@ data:
   image_size: 256
 
 repaint:
-  num_inferencing_steps:1000
+  # Original RePaint face configuration: 1000 training steps respaced to 250.
+  num_inference_steps: 250
+  jump_length: 10
+  jump_n_sample: 10
+  # A 0.35 side ratio means the center square covers ~12.25% of all pixels.
+  mask_ratio: 0.35
+  seed: 42
+
+evaluation:
+  # Keep the first benchmark bounded; set null to process the complete dataset.
+  max_images: 5

@@ -1,301 +1,134 @@
-
+"""Run one deterministic, paper-schedule RePaint benchmark."""
 import json
-import random
-import time
 from pathlib import Path
+import sys
 
 import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import load_config
 from src.dataset import load_image, tensor_to_pil
 from src.mask import create_center_mask
-from src.model import load_pretrained_ddpm, get_device
-from src.repaint import repaint_pipeline
+from src.metrics import compute_metrics
+from src.model import get_device, load_pretrained_ddpm
+from src.repaint import build_repaint_schedule, repaint_pipeline
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESULT_DIR = PROJECT_ROOT / "results_benchmarks"
-
-SEED = 42
-MASK_RATIO = 0.35
-
-# Start with no extra jumps for the baseline.
-# After validating the sampler, compare fixed resampling budgets.
-JUMP_LENGTH = 10
-JUMP_N_SAMPLE = 0
-
-# Set to a filename if you want a specific image.
-# Example: "000001.png"
-FIXED_IMAGE_NAME = None
-
-
-def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility."""
-    random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def get_test_image() -> Path:
-    """Select a deterministic image from data/celeba."""
-    data_dir = PROJECT_ROOT / "data" / "celeba"
-
-    extensions = {".png", ".jpg", ".jpeg"}
+def get_test_image(data_dir: Path) -> Path:
     images = sorted(
-        p for p in data_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in extensions
+        (path for path in data_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS),
+        key=lambda p: str(p).lower(),
     )
-
     if not images:
         raise FileNotFoundError(
-            f"No PNG/JPG/JPEG images found in:\n{data_dir}\n"
-            "Place your test images inside data/celeba/."
+            f"No supported image files found under {data_dir}. "
+            "Place test images in data/celeba/ (nested folders are supported)."
         )
-
-    if FIXED_IMAGE_NAME is not None:
-        matches = [
-            p for p in images if p.name == FIXED_IMAGE_NAME
-        ]
-        if not matches:
-            raise FileNotFoundError(
-                f"Could not find {FIXED_IMAGE_NAME} in {data_dir}"
-            )
-        image_path = matches[0]
-    else:
-        image_path = images[0]
-
-    print(f"Selected image: {image_path}")
-    return image_path
+    return images[0]
 
 
-def save_tensor_image(tensor: torch.Tensor, path: Path) -> None:
-    """Save a [1, C, H, W] image tensor using the project's converter."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    image = tensor_to_pil(tensor.detach().cpu())
-    image.save(path)
+def _write_json(path: Path, content) -> None:
+    path.write_text(json.dumps(content, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    set_seed(SEED)
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Separate output folder for this configuration.
-    run_name = (
-        f"seed{SEED}_mask{MASK_RATIO:.2f}_"
-        f"jump{JUMP_LENGTH}_n{JUMP_N_SAMPLE}"
-    )
-    run_dir = RESULT_DIR / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    config_path = PROJECT_ROOT / "configs" / "config.yaml"
-    cfg = load_config(str(config_path))
-
+    cfg = load_config(str(PROJECT_ROOT / "configs" / "config.yaml"))
     image_size = int(cfg["data"]["image_size"])
-    model_name = cfg["model"]["pretrained_model_name"]
+    repaint_cfg = cfg.get("repaint", {})
+    steps = int(repaint_cfg.get("num_inference_steps", repaint_cfg.get("num_inferencing_steps", 250)))
+    jump_length = int(repaint_cfg.get("jump_length", 10))
+    jump_n_sample = int(repaint_cfg.get("jump_n_sample", 10))
+    mask_ratio = float(repaint_cfg.get("mask_ratio", 0.35))
+    seed = int(repaint_cfg.get("seed", 42))
 
     device = get_device()
+    print(f"Project root       : {PROJECT_ROOT}")
+    print(f"Device             : {device}")
+    print(f"Image size         : {image_size}")
 
-    print("=" * 64)
-    print("RePaint single-image experiment")
-    print("=" * 64)
-    print(f"Project root : {PROJECT_ROOT}")
-    print(f"Model        : {model_name}")
-    print(f"Device       : {device}")
-    print(f"Image size   : {image_size}")
-    print(f"Seed         : {SEED}")
-    print(f"Mask ratio   : {MASK_RATIO}")
-    print(f"Jump length  : {JUMP_LENGTH}")
-    print(f"Jump samples : {JUMP_N_SAMPLE}")
-    print(f"Output dir   : {run_dir}")
-    print("=" * 64)
+    image_path = get_test_image(PROJECT_ROOT / "data" / "celeba")
+    print(f"Deterministic input : {image_path}")
+    x_0 = load_image(str(image_path), image_size=image_size).to(device)
 
+    model_name = cfg["model"]["pretrained_model_name"]
+    model, scheduler, device = load_pretrained_ddpm(model_name, device=device)
+    print(f"Pretrained model   : {model_name}")
+    print(f"Training timesteps : {int(scheduler.config.num_train_timesteps)}")
 
-    model, scheduler, device = load_pretrained_ddpm(
-        model_name,
-        device=device,
-    )
-    model.eval()
+    mask = create_center_mask(image_size=image_size, mask_ratio=mask_ratio).to(device)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    schedule = build_repaint_schedule(steps, jump_length, jump_n_sample)
+    reverse_calls = sum(a > b for a, b in zip(schedule[:-1], schedule[1:]))
+    forward_transitions = sum(max(0, b - a) for a, b in zip(schedule[:-1], schedule[1:]))
 
-    print("Pretrained model loaded.")
-
-    image_path = get_test_image()
-    x_0 = load_image(str(image_path)).to(device)
-
-    if x_0.ndim != 4 or x_0.shape[0] != 1:
-        raise ValueError(
-            f"Expected one image with shape [1, C, H, W], got {x_0.shape}"
-        )
-
-    if x_0.shape[1] != 3:
-        raise ValueError(
-            f"Expected an RGB image with 3 channels, got {x_0.shape[1]}"
-        )
-
-    if x_0.shape[-2:] != (image_size, image_size):
-        print(
-            f"Resizing input from {tuple(x_0.shape[-2:])} "
-            f"to {(image_size, image_size)}"
-        )
-        x_0 = torch.nn.functional.interpolate(
-            x_0,
-            size=(image_size, image_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-
-    x_0 = x_0.clamp(-1.0, 1.0)
-
-    print(f"Input shape  : {tuple(x_0.shape)}")
     print(
-        f"Input range  : "
-        f"[{x_0.min().item():.4f}, {x_0.max().item():.4f}]"
+        f"RePaint schedule    : T={steps}, jump_length={jump_length}, "
+        f"jump_n_sample={jump_n_sample}"
+    )
+    print(f"Reverse model calls : {reverse_calls}")
+    print(f"Forward respaced transitions: {forward_transitions}")
+    print("Running sampler; the paper schedule intentionally revisits timesteps.")
+
+    output = repaint_pipeline(
+        model=model,
+        scheduler=scheduler,
+        x_0=x_0,
+        mask=mask,
+        num_inference_steps=steps,
+        jump_length=jump_length,
+        jump_n_sample=jump_n_sample,
+        generator=generator,
     )
 
-    # -----------------------------------------------------
-    # Create mask
-    # Convention: 1 = missing, 0 = known
-    # -----------------------------------------------------
+    run_name = f"seed{seed}_T{steps}_j{jump_length}_r{jump_n_sample}_mask{mask_ratio:g}"
+    result_dir = PROJECT_ROOT / "results_benchmarks" / run_name
+    result_dir.mkdir(parents=True, exist_ok=True)
 
-    mask = create_center_mask(
-        image_size=image_size,
-        mask_ratio=MASK_RATIO,
-    ).to(device=device, dtype=x_0.dtype)
+    known_mask = 1.0 - mask
+    masked_display = x_0 * known_mask + (-1.0) * mask  # black hole in [-1, 1] space
+    composite = known_mask * x_0 + mask * output
+    tensor_to_pil(x_0).save(result_dir / "original_input.png")
+    tensor_to_pil(masked_display).save(result_dir / "masked_input.png")
+    tensor_to_pil(output).save(result_dir / "generated_output.png")
+    tensor_to_pil(composite).save(result_dir / "composited_output.png")
+    mask_img = (mask[0, 0].detach().cpu().clamp(0, 1) * 255).round().byte().numpy()
+    from PIL import Image
+    Image.fromarray(mask_img, mode="L").save(result_dir / "mask_missing_white.png")
 
-    if mask.ndim != 4 or mask.shape[1] != 1:
-        raise ValueError(
-            f"Expected mask shape [B, 1, H, W], got {mask.shape}"
-        )
-
-    if mask.shape[0] not in (1, x_0.shape[0]):
-        raise ValueError("Mask batch dimension does not match the input.")
-
-    if mask.shape[-2:] != x_0.shape[-2:]:
-        raise ValueError("Mask and image dimensions do not match.")
-
-    if not torch.all((mask == 0) | (mask == 1)):
-        raise ValueError("Mask must be binary, with values 0 and 1.")
-
-    missing_fraction = mask.float().mean().item()
-
-    print(f"Mask shape   : {tuple(mask.shape)}")
-    print(f"Missing area : {missing_fraction:.4f}")
-
-    # -----------------------------------------------------
-    # Save original and masked input before inference
-    # -----------------------------------------------------
-
-    save_tensor_image(x_0, run_dir / "original_input.png")
-
-    masked_input = x_0 * (1.0 - mask)
-    save_tensor_image(masked_input, run_dir / "masked_input.png")
-
-    save_tensor_image(
-        mask.expand(-1, 3, -1, -1),
-        run_dir / "mask.png",
-    )
-
-    generator = torch.Generator(device=device).manual_seed(SEED)
-
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
-        torch.cuda.synchronize(device)
-
-    start_time = time.perf_counter()
-
-    with torch.inference_mode():
-        output = repaint_pipeline(
-            model=model,
-            scheduler=scheduler,
-            x_0=x_0,
-            mask=mask,
-            jump_length=JUMP_LENGTH,
-            jump_n_sample=JUMP_N_SAMPLE,
-            generator=generator,
-        )
-
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-    elapsed_seconds = time.perf_counter() - start_time
-
-    if output.shape != x_0.shape:
-        raise ValueError(
-            f"Output shape {output.shape} does not match input {x_0.shape}"
-        )
-
-    if not torch.isfinite(output).all():
-        raise ValueError("Output contains NaN or infinite values.")
-
-    output = output.clamp(-1.0, 1.0)
-
-    save_tensor_image(output, run_dir / "generated_output.png")
-
-    # Explicitly composite the original known pixels with the
-    # generated missing region for a preservation reference.
-    composite = (1.0 - mask) * x_0 + mask * output
-    save_tensor_image(composite, run_dir / "composited_output.png")
-
-    known_region = 1.0 - mask
-
-    known_abs_error = (
-        (output - x_0).abs() * known_region
-    ).sum() / (
-        known_region.sum() * x_0.shape[1]
-    ).clamp_min(1.0)
-
-    metrics = {
+    metrics = compute_metrics(output, x_0, mask, compute_ssim=True)
+    run_config = {
+        "model_name": model_name,
         "input_image": str(image_path.relative_to(PROJECT_ROOT)),
-        "model": model_name,
-        "device": str(device),
-        "seed": SEED,
         "image_size": image_size,
-        "mask_ratio_parameter": MASK_RATIO,
-        "actual_missing_fraction": missing_fraction,
-        "jump_length": JUMP_LENGTH,
-        "jump_n_sample": JUMP_N_SAMPLE,
-        "runtime_seconds": elapsed_seconds,
-        "known_region_mean_absolute_error": known_abs_error.item(),
-        "output_min": output.min().item(),
-        "output_max": output.max().item(),
+        "num_train_timesteps": int(scheduler.config.num_train_timesteps),
+        "num_inference_steps": steps,
+        "respacing_stride": int(scheduler.config.num_train_timesteps) // steps,
+        "jump_length": jump_length,
+        "jump_n_sample": jump_n_sample,
+        "seed": seed,
+        "mask_convention": "1=missing/repaint, 0=known",
+        "mask_shape": list(mask.shape),
+        "mask_missing_pixel_fraction": float(mask.mean().item()),
+        "schedule_entries": len(schedule),
+        "reverse_model_calls": reverse_calls,
+        "forward_respaced_transitions": forward_transitions,
+        "raw_known_region_final_max_abs_error": float(((output - x_0).abs() * known_mask).max().item()),
     }
+    _write_json(result_dir / "config_used.json", run_config)
+    _write_json(result_dir / "metrics.json", metrics)
 
-    if device.type == "cuda":
-        metrics["peak_gpu_memory_mb"] = (
-            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-        )
-
-    with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
-
-    with open(run_dir / "config_used.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "model": model_name,
-                "image_path": str(image_path),
-                "seed": SEED,
-                "mask_ratio": MASK_RATIO,
-                "jump_length": JUMP_LENGTH,
-                "jump_n_sample": JUMP_N_SAMPLE,
-                "image_size": image_size,
-            },
-            f,
-            indent=2,
-        )
-
-    print()
-    print("=" * 64)
-    print("Experiment completed")
-    print("=" * 64)
-    print(f"Runtime                  : {elapsed_seconds:.2f} seconds")
-    print(f"Known-region MAE         : {known_abs_error.item():.6f}")
-    print(f"Output directory         : {run_dir}")
-    print(f"Metrics                  : {run_dir / 'metrics.json'}")
-    print(f"Generated image          : {run_dir / 'generated_output.png'}")
-    print(f"Composited image         : {run_dir / 'composited_output.png'}")
-    print("=" * 64)
+    print(f"Known-region MAE   : {metrics['known_mae']:.8f}")
+    print(f"Missing-region MAE : {metrics['missing_mae']:.6f}")
+    print(f"Full-image PSNR    : {metrics['full_psnr_db']:.3f} dB")
+    print(f"Full-image SSIM    : {metrics['full_ssim']}")
+    print(f"Saved results      : {result_dir}")
+    if metrics["full_ssim"] is None:
+        print("Note: install requirements.txt to enable SSIM (torchmetrics).")
 
 
 if __name__ == "__main__":
