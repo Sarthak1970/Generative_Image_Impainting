@@ -20,7 +20,7 @@ def load_mask(path:str, image_size:int=256)->torch.Tensor:
     pixel>0.5 = 1(region to repain) others are 0.0(known region)"""
 
     mask=Image.open(path).convert("L")
-    transform=T.compose([
+    transform=T.Compose([
         T.Resize((image_size,image_size)),
         T.ToTensor()
     ])
