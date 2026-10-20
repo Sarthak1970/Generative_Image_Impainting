@@ -16,3 +16,34 @@ repaint:
 evaluation:
   # Keep the first benchmark bounded; set null to process the complete dataset.
   max_images: 5
+
+# ---------------------------------------------------------------------------
+# Research extension: Pilot-Guided, Mask-Aware Budgeted RePaint.
+# Not used by scripts/run_local.py, run_batch.py or evaluate.py; the fixed
+# baseline above is unchanged. See Docs/budget_aware_repaint_methods.md.
+budget_aware:
+  # Total denoiser evaluations (NFE) per image. null = the measured NFE of the
+  # fixed RePaint schedule above (2410 for T=250, j=10, r=10).
+  reference_budget_nfe: null
+  # Extra resampling cycles per eligible anchor (one cycle = jump_length
+  # forward steps + jump_length reverse model calls). 14 extra = r 15, the
+  # largest per-anchor resampling count evaluated in the RePaint paper.
+  min_extra_cycles: 3
+  max_extra_cycles: 14
+  # score = hole_share + lambda_boundary * boundary_share (see Docs).
+  lambda_boundary: 0.5
+  boundary_band_px: 8
+  # "known_ratio": divide hole/boundary drift by known-region drift at the
+  # same anchor; "none": raw RMS drift.
+  normalization: known_ratio
+  ratio_eps: 1.0e-3
+
+experiment:
+  # Separate seeds: the initial latent x_T is shared by every method, and each
+  # sampler pass gets a fresh generator seeded with noise_seed.
+  latent_seed: 42
+  noise_seed: 43
+  pilot_noise_seed: 43
+  # Images under data/celeba (see scripts/download_celeba_sample.py).
+  data_dir: data/celeba
+  results_dir: results_benchmarks

@@ -6,3 +6,4 @@ backup
 results_benchmarks
 
 __pycache__
+.pytest_cache

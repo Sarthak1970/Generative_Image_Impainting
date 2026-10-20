@@ -37,3 +37,39 @@ def create_half_mask(image_size: int = 256, mode: str = "bottom") -> torch.Tenso
     else:
         raise ValueError(f"Unknown half-mask mode: {mode!r}")
     return mask
+
+
+def create_boundary_band(mask: torch.Tensor, width: int = 8, side: str = "both") -> torch.Tensor:
+    """Return a binary band of pixels within ``width`` px of the hole boundary.
+
+    ``mask`` is [B, 1, H, W] with 1 = missing. Distances use the Chebyshev
+    (square) neighbourhood implemented by max-pooling, so no extra packages
+    are needed. ``side`` selects:
+
+    * ``"inner"``: missing pixels with a known pixel within ``width`` px;
+    * ``"outer"``: known pixels with a missing pixel within ``width`` px;
+    * ``"both"``: the union of the two (a ring straddling the seam).
+
+    An all-known or all-missing mask has no boundary and yields all zeros.
+    Pixels beyond the image border are not treated as known or missing.
+    """
+    if mask.ndim != 4 or mask.shape[1] != 1:
+        raise ValueError("mask must have shape [B, 1, H, W]")
+    if int(width) != width or width < 1:
+        raise ValueError("width must be a positive integer")
+    if side not in ("both", "inner", "outer"):
+        raise ValueError(f"Unknown boundary side: {side!r}")
+    missing = (mask > 0.5).to(torch.float32)
+    known = 1.0 - missing
+    kernel = 2 * int(width) + 1
+    near_missing = torch.nn.functional.max_pool2d(missing, kernel, stride=1, padding=int(width))
+    near_known = torch.nn.functional.max_pool2d(known, kernel, stride=1, padding=int(width))
+    inner = missing * near_known
+    outer = known * near_missing
+    if side == "inner":
+        band = inner
+    elif side == "outer":
+        band = outer
+    else:
+        band = torch.clamp(inner + outer, max=1.0)
+    return band.to(dtype=mask.dtype if torch.is_floating_point(mask) else torch.float32)
