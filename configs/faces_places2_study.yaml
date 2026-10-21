@@ -1,0 +1,62 @@
+# Faces vs Places2 mask-geometry and LPIPS study (Notebook 03).
+# New file: configs/config.yaml and the existing baseline are not changed.
+# Relative paths are resolved from the project root.
+
+study:
+  results_dir: results_benchmarks/faces_places2_study
+  image_size: 256
+  mask_base_seed: 2026          # masks depend on (family, ratio, image index, this seed), not on the dataset
+  latent_seed: 42               # x_T seed for image index i is latent_seed + i (shared by all methods/masks)
+  noise_seed: 43                # sampler-noise seed for image index i is noise_seed + i
+  boundary_band_px: 8           # inner boundary band width used by the metrics
+  require_lpips: true           # full mode refuses to run without a valid LPIPS
+  lpips_net: alex
+  methods: [no_resampling, fixed, uniform, adaptive]
+
+masks:
+  families: [center_square, random_rectangles, irregular_brush, multiple_holes,
+             stripes_horizontal, stripes_vertical, large_rectangle, random_blocks, border_frame]
+  target_ratios: [0.10, 0.25, 0.40, 0.60]
+  not_applicable:
+    large_rectangle: [0.10]     # a 10 % single rectangle is not "large"
+  coverage_tolerance: 0.01
+
+# Inference budgets. "paper" = RePaint face/places configs (T=250, j=10, r=10 -> 2410 NFE).
+# Adaptive/uniform limits must make the cycle budget feasible:
+#   anchors * min_extra <= extra_cycles <= anchors * max_extra.
+budgets:
+  smoke:   {num_inference_steps: 50,  jump_length: 5,  jump_n_sample: 3,  min_extra_cycles: 0, max_extra_cycles: 4}
+  reduced: {num_inference_steps: 100, jump_length: 10, jump_n_sample: 5,  min_extra_cycles: 1, max_extra_cycles: 6}
+  paper:   {num_inference_steps: 250, jump_length: 10, jump_n_sample: 10, min_extra_cycles: 3, max_extra_cycles: 14}
+
+adaptive:                        # same meaning as budget_aware in configs/config.yaml
+  lambda_boundary: 0.5
+  boundary_band_px: 8
+  normalization: known_ratio
+  ratio_eps: 1.0e-3
+
+datasets:
+  faces:
+    description: CelebA images with the project's Hugging Face DDPM (continuity with the baseline)
+    backend: diffusers_ddpm
+    model_id: google/ddpm-celebahq-256
+    data_dirs: [data/celeba]
+    preprocessing: project_resize   # existing src.dataset.load_image (stretches 178x218 -> 256x256)
+    max_images: 5
+    selection: first
+  places2:
+    description: Places2 scenes with the official RePaint Places2 checkpoint (guided-diffusion)
+    backend: repaint_guided_diffusion
+    checkpoint_candidates:
+      - data/pretrained/places256_300000.pt
+      - external/RePaint/data/pretrained/places256_300000.pt
+      - /kaggle/input/repaint-places2-checkpoint/places256_300000.pt
+    official_code_dirs: [external/RePaint, /kaggle/working/RePaint]
+    data_dirs:
+      - data/places2
+      - external/RePaint/data/datasets/gts/p256     # official RePaint data.zip (Places2 test images)
+      - /kaggle/input/places365-val-256/val_256
+    preprocessing: center_crop      # guided-diffusion center_crop_arr; identity for 256x256 inputs
+    max_images: 5
+    selection: first
+    use_fp16: false
